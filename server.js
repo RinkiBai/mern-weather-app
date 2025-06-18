@@ -7,25 +7,35 @@ const rateLimit = require('express-rate-limit');
 
 const app = express();
 
-// Environment Validation
-const allowedOrigins = [process.env.FRONTEND_URL || 'https://mern-weather-app-rinki-bais-projects.vercel.app'];
+// ✅ Allowed origins (adjust for your project needs)
+const allowedOrigins = [
+  'https://mern-weather-app-rinki-bais-projects.vercel.app',
+  'https://mern-weather-gykk4njcy-rinki-bais-projects.vercel.app',
+  'http://localhost:5173',
+];
 
-// Middleware
+// ✅ CORS Middleware
 app.use(cors({
   origin: (origin, callback) => {
-    if (!origin || allowedOrigins.includes(origin)) {
+    if (
+      !origin ||
+      allowedOrigins.includes(origin) ||
+      origin.endsWith('.vercel.app')
+    ) {
       callback(null, true);
     } else {
+      console.error(`❌ CORS blocked: ${origin}`);
       callback(new Error('Not allowed by CORS'));
     }
   },
   credentials: true
 }));
+
 app.use(express.json());
 
 // Rate Limiting
 const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
+  windowMs: 15 * 60 * 1000,
   max: 100,
   message: 'Too many requests from this IP, please try again later.'
 });
@@ -41,11 +51,7 @@ mongoose.connect(process.env.MONGO_URI)
 
 // Schema & Model
 const searchSchema = new mongoose.Schema({
-  city: { 
-    type: String, 
-    required: true,
-    lowercase: true
-  },
+  city: { type: String, required: true, lowercase: true },
   searchedAt: { type: Date, default: Date.now },
 });
 const Search = mongoose.model('Search', searchSchema);
@@ -56,10 +62,8 @@ if (!apiKey) {
   process.exit(1);
 }
 
-// Helper functions
 const normalizeCity = (city) => city.trim().toLowerCase();
 
-// Convert timezone ID to UTC offset in seconds
 const getTimezoneOffset = (tzId) => {
   try {
     const date = new Date();
@@ -68,8 +72,7 @@ const getTimezoneOffset = (tzId) => {
     const offsetPart = parts.find(part => part.type === 'timeZoneName');
     if (!offsetPart) return 0;
 
-    const offsetStr = offsetPart.value; // e.g., "GMT+05:30"
-    const match = offsetStr.match(/GMT([+-])(\d{2}):(\d{2})/);
+    const match = offsetPart.value.match(/GMT([+-])(\d{2}):(\d{2})/);
     if (!match) return 0;
 
     const sign = match[1] === '+' ? 1 : -1;
@@ -78,85 +81,49 @@ const getTimezoneOffset = (tzId) => {
     return sign * (hours * 3600 + minutes * 60);
   } catch (error) {
     console.error(`Failed to get timezone offset for ${tzId}:`, error);
-    return 0; // Fallback to 0 offset (UTC)
+    return 0;
   }
 };
 
-// Validate coordinates middleware
 const validateCoordinates = (req, res, next) => {
   const { lat, lon } = req.query;
-
-  if (!lat || !lon) {
-    return res.status(400).json({ 
-      error: 'Missing coordinates',
-      details: 'Both lat and lon parameters are required'
-    });
-  }
-
   const latNum = parseFloat(lat);
   const lonNum = parseFloat(lon);
 
-  if (isNaN(latNum) || isNaN(lonNum)) {
-    return res.status(400).json({ 
-      error: 'Invalid coordinates',
-      details: 'Latitude and longitude must be numbers'
-    });
-  }
-
-  if (latNum < -90 || latNum > 90 || lonNum < -180 || lonNum > 180) {
-    return res.status(400).json({
-      error: 'Invalid coordinates',
-      details: 'Latitude must be between -90 and 90, longitude between -180 and 180'
-    });
+  if (!lat || !lon || isNaN(latNum) || isNaN(lonNum) || latNum < -90 || latNum > 90 || lonNum < -180 || lonNum > 180) {
+    return res.status(400).json({ error: 'Invalid coordinates' });
   }
 
   req.coordinates = { lat: latNum, lon: lonNum };
   next();
 };
 
-// Coordinate-based weather endpoint
 app.get('/weather/coords', validateCoordinates, async (req, res) => {
   const { lat, lon } = req.coordinates;
-
-  const formattedLat = lat.toFixed(2);
-  const formattedLon = lon.toFixed(2);
-  const url = `http://api.weatherapi.com/v1/current.json?key=${apiKey}&q=${formattedLat},${formattedLon}&aqi=no`;
+  const url = `http://api.weatherapi.com/v1/current.json?key=${apiKey}&q=${lat.toFixed(2)},${lon.toFixed(2)}&aqi=no`;
 
   try {
     const weatherRes = await axios.get(url);
     const { location, current } = weatherRes.data;
-
-    if (!location || !current) {
-      return res.status(500).json({
-        error: 'Invalid response from weather API',
-        details: 'Expected location and current data'
-      });
-    }
-
     const actualCity = normalizeCity(location.name);
 
-    try {
-      await Search.findOneAndUpdate(
-        { city: actualCity },
-        { $set: { searchedAt: new Date(), city: actualCity } },
-        { upsert: true, new: true }
-      );
-    } catch (dbError) {
-      console.error('Failed to update search history:', dbError);
-    }
+    await Search.findOneAndUpdate(
+      { city: actualCity },
+      { $set: { searchedAt: new Date(), city: actualCity } },
+      { upsert: true, new: true }
+    );
 
-    // Fetch sunrise/sunset from forecast endpoint
-    let sunrise, sunset;
+    let sunrise = null, sunset = null;
     try {
-      const forecastUrl = `http://api.weatherapi.com/v1/forecast.json?key=${apiKey}&q=${formattedLat},${formattedLon}&days=1&aqi=no&alerts=no`;
+      const forecastUrl = `http://api.weatherapi.com/v1/forecast.json?key=${apiKey}&q=${lat},${lon}&days=1`;
       const forecastRes = await axios.get(forecastUrl);
       const astro = forecastRes.data.forecast?.forecastday?.[0]?.astro;
       if (astro) {
         sunrise = new Date(`${forecastRes.data.location.localtime.split(' ')[0]} ${astro.sunrise}`).getTime() / 1000;
         sunset = new Date(`${forecastRes.data.location.localtime.split(' ')[0]} ${astro.sunset}`).getTime() / 1000;
       }
-    } catch (error) {
-      console.error('Failed to fetch sunrise/sunset:', error);
+    } catch (err) {
+      console.error('Sunrise/sunset fetch failed:', err);
     }
 
     res.json({
@@ -174,83 +141,8 @@ app.get('/weather/coords', validateCoordinates, async (req, res) => {
       feels_like: current.feelslike_c,
       clouds: current.cloud,
       uvi: current.uv,
-      sunrise: sunrise || null,
-      sunset: sunset || null,
-      timezone: getTimezoneOffset(location.tz_id)
-    });
-  } catch (error) {
-    res.status(error.response?.status || 500).json({
-      error: error.response?.data?.error?.message || 'Failed to fetch weather data for coordinates',
-      code: error.response?.data?.error?.code || 'unknown_error'
-    });
-  }
-});
-
-// City-based weather endpoint
-app.get('/weather/:city', async (req, res) => {
-  const rawCity = req.params.city;
-  if (!rawCity?.trim()) {
-    return res.status(400).json({ 
-      error: 'City parameter is required',
-      details: 'A valid city name must be provided'
-    });
-  }
-
-  const url = `http://api.weatherapi.com/v1/current.json?key=${apiKey}&q=${encodeURIComponent(rawCity)}&aqi=no`;
-  try {
-    const weatherRes = await axios.get(url);
-    const { location, current } = weatherRes.data;
-
-    if (!location || !current) {
-      return res.status(500).json({
-        error: 'Invalid response from weather API',
-        details: 'Expected location and current data'
-      });
-    }
-
-    const actualCity = normalizeCity(location.name);
-
-    try {
-      await Search.findOneAndUpdate(
-        { city: actualCity },
-        { $set: { searchedAt: new Date(), city: actualCity } },
-        { upsert: true, new: true }
-      );
-    } catch (dbError) {
-      console.error('Failed to update search history:', dbError);
-    }
-
-    // Fetch sunrise/sunset from forecast endpoint
-    let sunrise, sunset;
-    try {
-      const forecastUrl = `http://api.weatherapi.com/v1/forecast.json?key=${apiKey}&q=${encodeURIComponent(rawCity)}&days=1&aqi=no&alerts=no`;
-      const forecastRes = await axios.get(forecastUrl);
-      const astro = forecastRes.data.forecast?.forecastday?.[0]?.astro;
-      if (astro) {
-        sunrise = new Date(`${forecastRes.data.location.localtime.split(' ')[0]} ${astro.sunrise}`).getTime() / 1000;
-        sunset = new Date(`${forecastRes.data.location.localtime.split(' ')[0]} ${astro.sunset}`).getTime() / 1000;
-      }
-    } catch (error) {
-      console.error('Failed to fetch sunrise/sunset:', error);
-    }
-
-    res.json({
-      city: location.name,
-      region: location.region,
-      country: location.country,
-      temp: current.temp_c,
-      description: current.condition.text,
-      icon: `https:${current.condition.icon}`,
-      last_updated: current.last_updated,
-      humidity: current.humidity,
-      wind: current.wind_kph,
-      pressure: current.pressure_mb,
-      visibility: current.vis_km,
-      feels_like: current.feelslike_c,
-      clouds: current.cloud,
-      uvi: current.uv,
-      sunrise: sunrise || null,
-      sunset: sunset || null,
+      sunrise,
+      sunset,
       timezone: getTimezoneOffset(location.tz_id)
     });
   } catch (error) {
@@ -261,104 +153,99 @@ app.get('/weather/:city', async (req, res) => {
   }
 });
 
-// Forecast weather data (8-hour forecast starting from current hour)
-app.get('/forecast/:city', async (req, res) => {
-  const city = req.params.city;
-  if (!city?.trim()) {
-    return res.status(400).json({
-      error: 'City parameter is required',
-      details: 'A valid city name must be provided for forecast'
-    });
-  }
-
-  const forecastUrl = `http://api.weatherapi.com/v1/forecast.json?key=${apiKey}&q=${encodeURIComponent(city)}&days=3&aqi=no&alerts=no`;
+app.get('/weather/:city', async (req, res) => {
+  const city = req.params.city?.trim();
+  if (!city) return res.status(400).json({ error: 'City is required' });
 
   try {
-    const forecastRes = await axios.get(forecastUrl);
-    const location = forecastRes.data.location;
-    const forecastData = forecastRes.data.forecast?.forecastday;
+    const url = `http://api.weatherapi.com/v1/current.json?key=${apiKey}&q=${encodeURIComponent(city)}&aqi=no`;
+    const { location, current } = (await axios.get(url)).data;
+    const actualCity = normalizeCity(location.name);
 
-    if (!forecastData || !Array.isArray(forecastData)) {
-      return res.status(500).json({
-        error: 'Invalid forecast data',
-        details: 'Expected forecastday array'
-      });
+    await Search.findOneAndUpdate(
+      { city: actualCity },
+      { $set: { searchedAt: new Date(), city: actualCity } },
+      { upsert: true, new: true }
+    );
+
+    let sunrise = null, sunset = null;
+    try {
+      const forecastUrl = `http://api.weatherapi.com/v1/forecast.json?key=${apiKey}&q=${encodeURIComponent(city)}&days=1`;
+      const forecastRes = await axios.get(forecastUrl);
+      const astro = forecastRes.data.forecast?.forecastday?.[0]?.astro;
+      if (astro) {
+        sunrise = new Date(`${forecastRes.data.location.localtime.split(' ')[0]} ${astro.sunrise}`).getTime() / 1000;
+        sunset = new Date(`${forecastRes.data.location.localtime.split(' ')[0]} ${astro.sunset}`).getTime() / 1000;
+      }
+    } catch (err) {
+      console.error('Sunrise/sunset fetch failed:', err);
     }
 
-    // Get the current time in the city's timezone using location.localtime
-    const localTimeStr = location.localtime;
-    const cityTime = new Date(localTimeStr.replace(' ', 'T'));
-    const cityTimeMs = cityTime.getTime();
+    res.json({
+      city: location.name,
+      region: location.region,
+      country: location.country,
+      temp: current.temp_c,
+      description: current.condition.text,
+      icon: `https:${current.condition.icon}`,
+      last_updated: current.last_updated,
+      humidity: current.humidity,
+      wind: current.wind_kph,
+      pressure: current.pressure_mb,
+      visibility: current.vis_km,
+      feels_like: current.feelslike_c,
+      clouds: current.cloud,
+      uvi: current.uv,
+      sunrise,
+      sunset,
+      timezone: getTimezoneOffset(location.tz_id)
+    });
+  } catch (error) {
+    res.status(error.response?.status || 500).json({
+      error: error.response?.data?.error?.message || 'Weather fetch failed',
+      code: error.response?.data?.error?.code || 'unknown_error'
+    });
+  }
+});
 
-    // Extract hourly data
-    const hourlyData = forecastData.flatMap(day =>
+app.get('/forecast/:city', async (req, res) => {
+  const city = req.params.city;
+  if (!city) return res.status(400).json({ error: 'City is required' });
+
+  try {
+    const forecastUrl = `http://api.weatherapi.com/v1/forecast.json?key=${apiKey}&q=${encodeURIComponent(city)}&days=3`;
+    const forecastRes = await axios.get(forecastUrl);
+    const { location, forecast } = forecastRes.data;
+    const hourlyData = forecast.forecastday.flatMap(day =>
       day.hour.map(hour => ({
         time: hour.time,
         temp_c: hour.temp_c,
         condition: hour.condition.text,
         icon: `https:${hour.condition.icon}`,
-        description: hour.condition.text
       }))
     );
 
-    // Log all available forecast hours with their millisecond timestamps
-    console.log('All forecast hours with timestamps:', hourlyData.map(item => ({
-      time: item.time,
-      timeMs: new Date(item.time.replace(' ', 'T')).getTime()
-    })));
+    const cityTimeMs = new Date(location.localtime.replace(' ', 'T')).getTime();
+    let startIndex = hourlyData.findIndex(item => new Date(item.time.replace(' ', 'T')).getTime() >= cityTimeMs);
+    if (startIndex === -1) startIndex = 0;
 
-    // Log the current time for comparison
-    console.log('City local time:', cityTime.toISOString(), 'City time (ms):', cityTimeMs);
-
-    // Find the first forecast entry after the current time
-    let startIndex = hourlyData.findIndex(item => {
-      const itemTime = new Date(item.time.replace(' ', 'T')).getTime();
-      return itemTime >= cityTimeMs;
-    });
-
-    // Log the calculated startIndex
-    console.log('Calculated startIndex:', startIndex);
-
-    // If no future time is found, wrap around to the beginning (e.g., next day)
-    if (startIndex === -1) {
-      console.log('No future time found, wrapping around to start');
-      startIndex = 0;
-    }
-
-    // Slice the next 8 hours
     let forecastSlice = hourlyData.slice(startIndex, startIndex + 8);
-
-    // If we don't have enough hours, append from the beginning (e.g., next day's data)
     if (forecastSlice.length < 8) {
-      console.log('Not enough hours, appending from beginning:', 8 - forecastSlice.length);
-      const remaining = 8 - forecastSlice.length;
-      const additionalHours = hourlyData.slice(0, remaining);
-      forecastSlice.push(...additionalHours);
+      forecastSlice = forecastSlice.concat(hourlyData.slice(0, 8 - forecastSlice.length));
     }
-
-    // Log the selected hours
-    console.log('Selected forecast hours:', forecastSlice.map(item => item.time));
 
     res.json(forecastSlice);
-  } catch (error) {
-    console.error('Forecast error:', error);
-    res.status(error.response?.status || 500).json({
-      error: error.response?.data?.error?.message || 'Failed to fetch forecast data',
-      code: error.response?.data?.error?.code || 'forecast_error'
-    });
+  } catch (err) {
+    res.status(err.response?.status || 500).json({ error: 'Forecast fetch failed' });
   }
 });
 
-// History endpoints
 app.get('/history', async (req, res) => {
   try {
-    const recent = await Search.find()
-      .sort({ searchedAt: -1 })
-      .limit(4)
-      .select('city -_id');
+    const recent = await Search.find().sort({ searchedAt: -1 }).limit(4).select('city -_id');
     res.json(recent.map(entry => entry.city));
   } catch (err) {
-    res.status(500).json({ error: 'Failed to fetch history', details: err.message });
+    res.status(500).json({ error: 'Failed to fetch history' });
   }
 });
 
@@ -367,11 +254,10 @@ app.delete('/history', async (req, res) => {
     await Search.deleteMany({});
     res.json({ message: 'History cleared successfully' });
   } catch (err) {
-    res.status(500).json({ error: 'Failed to clear history', details: err.message });
+    res.status(500).json({ error: 'Failed to clear history' });
   }
 });
 
-// Autocomplete endpoint
 app.get('/autocomplete', async (req, res) => {
   try {
     const query = req.query.q?.trim();
@@ -379,25 +265,24 @@ app.get('/autocomplete', async (req, res) => {
 
     const suggestions = await Search.find({
       city: { $regex: `^${normalizeCity(query)}` }
-    })
-      .limit(5)
-      .select('city -_id');
+    }).limit(5).select('city -_id');
 
-    const formatted = suggestions.map(item => 
+    const formatted = suggestions.map(item =>
       item.city.charAt(0).toUpperCase() + item.city.slice(1)
     );
 
     res.json(formatted);
   } catch (err) {
-    res.status(500).json({ error: 'Autocomplete service failed', details: err.message });
+    res.status(500).json({ error: 'Autocomplete service failed' });
   }
 });
 
-// Error handling middleware
+// Generic error handler
 app.use((err, req, res, next) => {
   console.error('Server error:', err);
-  res.status(500).json({ error: 'Internal server error', details: err.message });
+  res.status(500).json({ error: 'Internal server error' });
 });
 
+// Start server
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
