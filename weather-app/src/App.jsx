@@ -23,7 +23,7 @@ function App() {
   const [unit, setUnit] = useState('metric');
   const autocompleteTimeout = useRef(null);
 
-  const API_BASE_URL = 'http://localhost:5000';
+  const API_BASE_URL = 'https://mern-weather-app-u3fb.onrender.com';
 
   const updateHistory = (data) => {
     setHistory(prev => {
