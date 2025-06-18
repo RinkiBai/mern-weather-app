@@ -8,7 +8,7 @@ const rateLimit = require('express-rate-limit');
 const app = express();
 
 // Environment Validation
-const allowedOrigins = [process.env.FRONTEND_URL || 'https://mern-weather-app-xi.vercel.app'];
+const allowedOrigins = [process.env.FRONTEND_URL || 'https://mern-weather-app-rinki-bais-projects.vercel.app'];
 
 // Middleware
 app.use(cors({
